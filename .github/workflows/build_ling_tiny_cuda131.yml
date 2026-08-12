@@ -1,0 +1,277 @@
+
+name: Build Ling Tiny CUDA 13.1
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+
+    runs-on: windows-2022
+
+    timeout-minutes: 180
+
+    steps:
+
+      # ==========================================================
+      # SOURCE
+      # ==========================================================
+
+      - name: Checkout BailingMoE3 llama.cpp
+
+        uses: actions/checkout@v4
+
+        with:
+
+          repository: aetherbird/llama.cpp
+
+          ref: bailingmoe3-support
+
+          fetch-depth: 1
+
+
+      # ==========================================================
+      # CUDA 13.1
+      # ==========================================================
+
+      - name: Install CUDA 13.1
+
+        uses: Jimver/cuda-toolkit@v0.2.36
+
+        id: cuda
+
+        with:
+
+          cuda: '13.1.0'
+
+          method: 'network'
+
+          sub-packages: >-
+            ["crt",
+             "cudart",
+             "cublas",
+             "cublas_dev",
+             "nvcc",
+             "nvrtc",
+             "nvrtc_dev",
+             "nvjitlink",
+             "thrust",
+             "visual_studio_integration"]
+
+
+      # ==========================================================
+      # SHOW CUDA VERSION
+      # ==========================================================
+
+      - name: Check CUDA
+
+        shell: pwsh
+
+        run: |
+
+          Write-Host "CUDA_PATH = $env:CUDA_PATH"
+
+          nvcc --version
+
+
+      # ==========================================================
+      # CONFIGURE LLAMA.CPP
+      # ==========================================================
+
+      - name: Configure llama.cpp
+
+        shell: pwsh
+
+        run: |
+
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DGGML_CUDA=ON `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_CURL=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=OFF `
+            -DCMAKE_CUDA_ARCHITECTURES=86
+
+
+      # ==========================================================
+      # BUILD
+      # ==========================================================
+
+      - name: Build llama-server
+
+        shell: pwsh
+
+        run: |
+
+          cmake --build build `
+            --config Release `
+            --target llama-server llama-cli `
+            --parallel 2
+
+
+      # ==========================================================
+      # VERIFY
+      # ==========================================================
+
+      - name: Verify llama-server
+
+        shell: pwsh
+
+        run: |
+
+          $server = "build\bin\Release\llama-server.exe"
+
+          if (!(Test-Path $server))
+          {
+              throw "llama-server.exe was not created"
+          }
+
+          & $server --version
+
+
+      # ==========================================================
+      # PACKAGE
+      # ==========================================================
+
+      - name: Package Windows build
+
+        shell: pwsh
+
+        run: |
+
+          $ErrorActionPreference = "Stop"
+
+          $out = Join-Path $PWD "package"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            $out | Out-Null
+
+
+          $bin = Join-Path `
+            $PWD `
+            "build\bin\Release"
+
+
+          # ------------------------------------------------------
+          # Copy llama.cpp binaries
+          # ------------------------------------------------------
+
+          Get-ChildItem `
+            $bin `
+            -File |
+
+          Where-Object {
+
+              $_.Extension -in ".exe", ".dll"
+
+          } |
+
+          Copy-Item `
+            -Destination $out `
+            -Force
+
+
+          # ------------------------------------------------------
+          # Copy required CUDA runtime DLLs
+          # ------------------------------------------------------
+
+          $cudaBin = Join-Path `
+            $env:CUDA_PATH `
+            "bin"
+
+
+          $patterns = @(
+
+              "cudart64_*.dll",
+
+              "cublas64_*.dll",
+
+              "cublasLt64_*.dll",
+
+              "nvrtc64_*.dll",
+
+              "nvrtc-builtins64_*.dll",
+
+              "nvJitLink_*.dll"
+
+          )
+
+
+          foreach ($pattern in $patterns)
+          {
+
+              Get-ChildItem `
+                $cudaBin `
+                -Filter $pattern `
+                -File `
+                -ErrorAction SilentlyContinue |
+
+              Copy-Item `
+                -Destination $out `
+                -Force
+
+          }
+
+
+          # ------------------------------------------------------
+          # Build revision
+          # ------------------------------------------------------
+
+          git rev-parse HEAD |
+
+          Out-File `
+            -Encoding ascii `
+            (Join-Path $out "SOURCE_COMMIT.txt")
+
+
+          @"
+Source: aetherbird/llama.cpp
+Branch: bailingmoe3-support
+CUDA: 13.1.0
+CUDA architecture: 86
+Windows: windows-2022
+Compiler: Visual Studio 2022
+"@ |
+
+          Out-File `
+            -Encoding ascii `
+            (Join-Path $out "BUILD_INFO.txt")
+
+
+          Write-Host ""
+          Write-Host "PACKAGE CONTENTS"
+          Write-Host "================"
+
+          Get-ChildItem $out |
+
+          Format-Table `
+            Name,
+            Length
+
+
+      # ==========================================================
+      # UPLOAD
+      # ==========================================================
+
+      - name: Upload Windows build
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: ling-tiny-cuda131-windows
+
+          path: package
+
+          compression-level: 0
+
+          retention-days: 7

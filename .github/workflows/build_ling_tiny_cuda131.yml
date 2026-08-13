@@ -1,188 +1,277 @@
+
 name: Build Ling Tiny CUDA 13.1
 
-on: [workflow_dispatch, push]
+on:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+
   build:
+
     runs-on: windows-2022
+
     timeout-minutes: 180
 
     steps:
+
+      # ==========================================================
+      # SOURCE
+      # ==========================================================
+
       - name: Checkout BailingMoE3 llama.cpp
+
         uses: actions/checkout@v4
+
         with:
+
           repository: aetherbird/llama.cpp
+
           ref: bailingmoe3-support
+
           fetch-depth: 1
 
+
+      # ==========================================================
+      # CUDA 13.1
+      # ==========================================================
+
       - name: Install CUDA 13.1
+
         uses: Jimver/cuda-toolkit@v0.2.36
+
+        id: cuda
+
         with:
+
           cuda: '13.1.0'
-          method: network
-          sub-packages: '["crt","cudart","cublas","cublas_dev","nvcc","nvrtc","nvrtc_dev","nvjitlink","thrust","visual_studio_integration"]'
+
+          method: 'network'
+
+          sub-packages: >-
+            ["crt",
+             "cudart",
+             "cublas",
+             "cublas_dev",
+             "nvcc",
+             "nvrtc",
+             "nvrtc_dev",
+             "nvjitlink",
+             "thrust",
+             "visual_studio_integration"]
+
+
+      # ==========================================================
+      # SHOW CUDA VERSION
+      # ==========================================================
 
       - name: Check CUDA
+
         shell: pwsh
+
         run: |
-          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+          Write-Host "CUDA_PATH = $env:CUDA_PATH"
+
           nvcc --version
 
+
+      # ==========================================================
+      # CONFIGURE LLAMA.CPP
+      # ==========================================================
+
       - name: Configure llama.cpp
-        shell: pwsh
-        run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DGGML_CUDA=ON -DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_SERVER=ON -DCMAKE_CUDA_ARCHITECTURES=86
 
-      - name: Build llama-server and llama-cli
         shell: pwsh
-        run: |
-          cmake --build build --config Release --target llama-server llama-cli --parallel 2
 
-      - name: Verify build
-        shell: pwsh
         run: |
+
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DGGML_CUDA=ON `
+            -DGGML_NATIVE=OFF `
+            -DLLAMA_CURL=OFF `
+            -DLLAMA_BUILD_SERVER=ON `
+            -DLLAMA_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=OFF `
+            -DCMAKE_CUDA_ARCHITECTURES=86
+
+
+      # ==========================================================
+      # BUILD
+      # ==========================================================
+
+      - name: Build llama-server
+
+        shell: pwsh
+
+        run: |
+
+          cmake --build build `
+            --config Release `
+            --target llama-server llama-cli `
+            --parallel 2
+
+
+      # ==========================================================
+      # VERIFY
+      # ==========================================================
+
+      - name: Verify llama-server
+
+        shell: pwsh
+
+        run: |
+
           $server = "build\bin\Release\llama-server.exe"
-          if (!(Test-Path $server)) { throw "llama-server.exe was not created" }
-          & $server --version
 
-      - name: Package TextGen drop-in build
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $out = Join-Path $PWD "package"
-          New-Item -ItemType Directory -Force $out | Out-Null
-          $bin = Join-Path $PWD "build\bin\Release"
-          Get-ChildItem $bin -File | Where-Object { $_.Extension -in ".exe", ".dll" } | Copy-Item -Destination $out -Force
-
-          $cudaBin = Join-Path $env:CUDA_PATH "bin"
-          $patterns = @("cudart64_*.dll", "cublas64_*.dll", "cublasLt64_*.dll", "nvrtc64_*.dll", "nvrtc-builtins64_*.dll", "nvJitLink_*.dll")
-          foreach ($pattern in $patterns) {
-            Get-ChildItem $cudaBin -Filter $pattern -File -ErrorAction SilentlyContinue | Copy-Item -Destination $out -Force
+          if (!(Test-Path $server))
+          {
+              throw "llama-server.exe was not created"
           }
 
-          git rev-parse HEAD | Out-File -Encoding ascii (Join-Path $out "SOURCE_COMMIT.txt")
-          @(
-            "Source: aetherbird/llama.cpp",
-            "Branch: bailingmoe3-support",
-            "CUDA: 13.1.0",
-            "CUDA architecture: 86",
-            "Windows: windows-2022",
-            "Compiler: Visual Studio 2022"
-          ) | Set-Content -Encoding ascii (Join-Path $out "BUILD_INFO.txt")
+          & $server --version
 
-          @(
-            '@echo off',
-            'setlocal EnableExtensions EnableDelayedExpansion',
-            'cd /d "%~dp0"',
-            'title Install Ling Tiny llama.cpp into TextGen',
-            'echo.',
-            'echo ============================================================',
-            'echo  Ling-3.0-tiny CUDA 13.1 - TextGen installer',
-            'echo ============================================================',
-            'echo CLOSE TEXTGEN before continuing.',
-            'echo.',
-            'set "ROOT=%~1"',
-            'if not defined ROOT set /p "ROOT=TextGen main folder: "',
-            'if not exist "%ROOT%" goto :badroot',
-            'set "TARGET="',
-            'if exist "%ROOT%\installer_files\env\Lib\site-packages\llama_cpp_binaries\bin\llama-server.exe" set "TARGET=%ROOT%\installer_files\env\Lib\site-packages\llama_cpp_binaries\bin"',
-            'if exist "%ROOT%\portable_env\Lib\site-packages\llama_cpp_binaries\bin\llama-server.exe" set "TARGET=%ROOT%\portable_env\Lib\site-packages\llama_cpp_binaries\bin"',
-            'if not defined TARGET goto :notfound',
-            'set "BACKUP=%TARGET%_BACKUP_%RANDOM%"',
-            'echo Backing up: %TARGET%',
-            'move "%TARGET%" "%BACKUP%" >nul',
-            'if errorlevel 1 goto :movefail',
-            'mkdir "%TARGET%" >nul 2>&1',
-            'copy /Y "%~dp0*.exe" "%TARGET%\" >nul',
-            'copy /Y "%~dp0*.dll" "%TARGET%\" >nul',
-            'if not exist "%TARGET%\llama-server.exe" goto :copyfail',
-            '(echo %TARGET%&echo %BACKUP%) > "%~dp0LAST_TEXTGEN_INSTALL.txt"',
-            'echo.',
-            'echo SUCCESS. Start TextGen normally and use the llama.cpp loader.',
-            'echo Backup: %BACKUP%',
-            'pause',
-            'exit /b 0',
-            ':badroot',
-            'echo ERROR: TextGen folder not found.',
-            'pause',
-            'exit /b 1',
-            ':notfound',
-            'echo ERROR: Could not find llama_cpp_binaries\bin in that TextGen folder.',
-            'echo Supported layouts: installer_files\env and portable_env.',
-            'pause',
-            'exit /b 1',
-            ':movefail',
-            'echo ERROR: Could not back up the existing bin folder. Make sure TextGen is closed.',
-            'pause',
-            'exit /b 1',
-            ':copyfail',
-            'echo ERROR: Copy failed. Restoring original files.',
-            'rmdir /S /Q "%TARGET%" >nul 2>&1',
-            'move "%BACKUP%" "%TARGET%" >nul',
-            'pause',
-            'exit /b 1'
-          ) | Set-Content -Encoding ascii (Join-Path $out "INSTALL_INTO_TEXTGEN.bat")
 
-          @(
-            '@echo off',
-            'setlocal EnableExtensions EnableDelayedExpansion',
-            'cd /d "%~dp0"',
-            'title Restore TextGen llama.cpp backup',
-            'if not exist "%~dp0LAST_TEXTGEN_INSTALL.txt" goto :none',
-            'set "TARGET="',
-            'set "BACKUP="',
-            'set /p TARGET=<"%~dp0LAST_TEXTGEN_INSTALL.txt"',
-            'for /f "usebackq skip=1 delims=" %%I in ("%~dp0LAST_TEXTGEN_INSTALL.txt") do if not defined BACKUP set "BACKUP=%%I"',
-            'if not exist "%BACKUP%" goto :none',
-            'echo CLOSE TEXTGEN, then press a key to restore the backup.',
-            'pause',
-            'if exist "%TARGET%" rmdir /S /Q "%TARGET%"',
-            'move "%BACKUP%" "%TARGET%" >nul',
-            'echo Original TextGen llama.cpp restored.',
-            'pause',
-            'exit /b 0',
-            ':none',
-            'echo No usable backup record was found.',
-            'pause',
-            'exit /b 1'
-          ) | Set-Content -Encoding ascii (Join-Path $out "RESTORE_TEXTGEN_BACKUP.bat")
+      # ==========================================================
+      # PACKAGE
+      # ==========================================================
 
-          @(
-            '@echo off',
-            'setlocal',
-            'cd /d "%~dp0"',
-            'set "MODEL=%~1"',
-            'if not defined MODEL goto :nomodel',
-            'start "" /min cmd /c "timeout /t 5 /nobreak >nul & start "" http://127.0.0.1:8080"',
-            '"%~dp0llama-server.exe" -m "%MODEL%" -ngl 99 -c 4096 --flash-attn on --host 127.0.0.1 --port 8080',
-            'pause',
-            'exit /b 0',
-            ':nomodel',
-            'echo Drag your Ling-3.0-tiny GGUF onto this BAT file.',
-            'pause',
-            'exit /b 1'
-          ) | Set-Content -Encoding ascii (Join-Path $out "START_LING_STANDALONE.bat")
+      - name: Package Windows build
 
-          @(
-            'Ling-3.0-tiny llama.cpp CUDA 13.1 TextGen drop-in build',
-            '',
-            '1. Close TextGen.',
-            '2. Drag your main TextGen folder onto INSTALL_INTO_TEXTGEN.bat.',
-            '3. Start TextGen and use the llama.cpp loader.',
-            '4. Use RESTORE_TEXTGEN_BACKUP.bat if you need the original binaries back.',
-            '',
-            'Built from aetherbird/llama.cpp branch bailingmoe3-support for SM86.'
-          ) | Set-Content -Encoding ascii (Join-Path $out "README_FIRST.txt")
+        shell: pwsh
 
-          Get-ChildItem $out | Format-Table Name, Length
+        run: |
 
-      - name: Upload final Windows package
+          $ErrorActionPreference = "Stop"
+
+          $out = Join-Path $PWD "package"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            $out | Out-Null
+
+
+          $bin = Join-Path `
+            $PWD `
+            "build\bin\Release"
+
+
+          # ------------------------------------------------------
+          # Copy llama.cpp binaries
+          # ------------------------------------------------------
+
+          Get-ChildItem `
+            $bin `
+            -File |
+
+          Where-Object {
+
+              $_.Extension -in ".exe", ".dll"
+
+          } |
+
+          Copy-Item `
+            -Destination $out `
+            -Force
+
+
+          # ------------------------------------------------------
+          # Copy required CUDA runtime DLLs
+          # ------------------------------------------------------
+
+          $cudaBin = Join-Path `
+            $env:CUDA_PATH `
+            "bin"
+
+
+          $patterns = @(
+
+              "cudart64_*.dll",
+
+              "cublas64_*.dll",
+
+              "cublasLt64_*.dll",
+
+              "nvrtc64_*.dll",
+
+              "nvrtc-builtins64_*.dll",
+
+              "nvJitLink_*.dll"
+
+          )
+
+
+          foreach ($pattern in $patterns)
+          {
+
+              Get-ChildItem `
+                $cudaBin `
+                -Filter $pattern `
+                -File `
+                -ErrorAction SilentlyContinue |
+
+              Copy-Item `
+                -Destination $out `
+                -Force
+
+          }
+
+
+          # ------------------------------------------------------
+          # Build revision
+          # ------------------------------------------------------
+
+          git rev-parse HEAD |
+
+          Out-File `
+            -Encoding ascii `
+            (Join-Path $out "SOURCE_COMMIT.txt")
+
+
+          @"
+Source: aetherbird/llama.cpp
+Branch: bailingmoe3-support
+CUDA: 13.1.0
+CUDA architecture: 86
+Windows: windows-2022
+Compiler: Visual Studio 2022
+"@ |
+
+          Out-File `
+            -Encoding ascii `
+            (Join-Path $out "BUILD_INFO.txt")
+
+
+          Write-Host ""
+          Write-Host "PACKAGE CONTENTS"
+          Write-Host "================"
+
+          Get-ChildItem $out |
+
+          Format-Table `
+            Name,
+            Length
+
+
+      # ==========================================================
+      # UPLOAD
+      # ==========================================================
+
+      - name: Upload Windows build
+
         uses: actions/upload-artifact@v4
+
         with:
-          name: LingTiny_llamaCPP_TextGen_CUDA13.1
+
+          name: ling-tiny-cuda131-windows
+
           path: package
+
           compression-level: 0
+
           retention-days: 7

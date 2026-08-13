@@ -1,0 +1,296 @@
+name: Build Ling Tiny CUDA 13.1 Fixed
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+
+    runs-on: windows-2022
+
+    timeout-minutes: 180
+
+    steps:
+
+      # --------------------------------------------------------
+      # Checkout this small builder repository
+      # --------------------------------------------------------
+
+      - name: Checkout builder
+
+        uses: actions/checkout@v4
+
+        with:
+
+          path: builder
+
+
+      # --------------------------------------------------------
+      # Checkout Ling-compatible llama.cpp
+      # --------------------------------------------------------
+
+      - name: Checkout BailingMoE3 llama.cpp
+
+        uses: actions/checkout@v4
+
+        with:
+
+          repository: aetherbird/llama.cpp
+
+          ref: bailingmoe3-support
+
+          fetch-depth: 1
+
+          path: src
+
+
+      # --------------------------------------------------------
+      # CUDA 13.1
+      #
+      # This uses llama.cpp's OWN Windows CUDA setup action.
+      # --------------------------------------------------------
+
+      - name: Install CUDA 13.1
+
+        uses: ./src/.github/actions/windows-setup-cuda
+
+        with:
+
+          cuda_version: '13.1'
+
+
+      # --------------------------------------------------------
+      # Ninja
+      # --------------------------------------------------------
+
+      - name: Install Ninja
+
+        shell: pwsh
+
+        run: |
+
+          choco install ninja -y --no-progress
+
+
+      # --------------------------------------------------------
+      # Verify CUDA
+      # --------------------------------------------------------
+
+      - name: Check CUDA
+
+        shell: pwsh
+
+        run: |
+
+          Write-Host "CUDA_PATH=$env:CUDA_PATH"
+
+          nvcc --version
+
+
+      # --------------------------------------------------------
+      # Configure
+      # --------------------------------------------------------
+
+      - name: Configure llama.cpp
+
+        shell: cmd
+
+        run: |
+
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake -S src -B build -G "Ninja Multi-Config" ^
+            -DLLAMA_BUILD_SERVER=ON ^
+            -DLLAMA_CURL=OFF ^
+            -DGGML_NATIVE=OFF ^
+            -DGGML_CUDA=ON ^
+            -DGGML_CPU_ALL_VARIANTS=ON ^
+            -DGGML_CUDA_CUB_3DOT2=ON ^
+            -DCMAKE_CUDA_ARCHITECTURES=86
+
+
+      # --------------------------------------------------------
+      # Build
+      # --------------------------------------------------------
+
+      - name: Build llama-server and llama-cli
+
+        shell: cmd
+
+        run: |
+
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+          cmake --build build ^
+            --config Release ^
+            -j 2 ^
+            --target llama-server llama-cli
+
+
+      # --------------------------------------------------------
+      # Verify binary
+      # --------------------------------------------------------
+
+      - name: Verify llama-server
+
+        shell: pwsh
+
+        run: |
+
+          if (!(Test-Path "build\bin\Release\llama-server.exe"))
+          {
+              throw "llama-server.exe was not created"
+          }
+
+          & "build\bin\Release\llama-server.exe" --version
+
+
+      # --------------------------------------------------------
+      # Package
+      # --------------------------------------------------------
+
+      - name: Package TextGen build
+
+        shell: pwsh
+
+        run: |
+
+          $ErrorActionPreference = "Stop"
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            dist | Out-Null
+
+
+          # llama.cpp EXEs
+
+          Copy-Item `
+            build\bin\Release\*.exe `
+            dist\ `
+            -Force
+
+
+          # llama / GGML DLLs
+
+          Copy-Item `
+            build\bin\Release\*.dll `
+            dist\ `
+            -Force `
+            -ErrorAction SilentlyContinue
+
+
+          # TextGen installer / launcher files
+
+          Copy-Item `
+            builder\package\* `
+            dist\ `
+            -Force
+
+
+          # CUDA runtime DLLs
+
+          $cudaBin = Join-Path `
+            $env:CUDA_PATH `
+            "bin"
+
+
+          $patterns = @(
+
+              "cudart64_*.dll",
+
+              "cublas64_*.dll",
+
+              "cublasLt64_*.dll",
+
+              "nvrtc64_*.dll",
+
+              "nvrtc-builtins64_*.dll",
+
+              "nvJitLink_*.dll"
+
+          )
+
+
+          foreach ($pattern in $patterns)
+          {
+
+              Get-ChildItem `
+                $cudaBin `
+                -Filter $pattern `
+                -File `
+                -ErrorAction SilentlyContinue |
+
+              Copy-Item `
+                -Destination dist\ `
+                -Force
+
+          }
+
+
+          # Exact source commit
+
+          $commit = git -C src rev-parse HEAD
+
+          $commit |
+
+          Out-File `
+            -Encoding ascii `
+            dist\SOURCE_COMMIT.txt
+
+
+          # Build information - NO YAML-breaking here-string
+
+          "Source: aetherbird/llama.cpp" |
+              Out-File -Encoding ascii dist\BUILD_INFO.txt
+
+          "Branch: bailingmoe3-support" |
+              Out-File -Encoding ascii -Append dist\BUILD_INFO.txt
+
+          "Commit: $commit" |
+              Out-File -Encoding ascii -Append dist\BUILD_INFO.txt
+
+          "CUDA: 13.1" |
+              Out-File -Encoding ascii -Append dist\BUILD_INFO.txt
+
+          "CUDA architecture: 86" |
+              Out-File -Encoding ascii -Append dist\BUILD_INFO.txt
+
+          "GPU target: RTX 3060 / Ampere" |
+              Out-File -Encoding ascii -Append dist\BUILD_INFO.txt
+
+
+          Write-Host ""
+          Write-Host "FINAL PACKAGE"
+          Write-Host "============="
+
+          Get-ChildItem dist |
+
+          Format-Table `
+            Name,
+            Length
+
+
+      # --------------------------------------------------------
+      # Artifact
+      # --------------------------------------------------------
+
+      - name: Upload Windows package
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: LingTiny_llamaCPP_TextGen_CUDA13.1
+
+          path: dist
+
+          compression-level: 0
+
+          retention-days: 7

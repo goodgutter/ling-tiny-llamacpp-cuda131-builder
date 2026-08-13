@@ -1,0 +1,13 @@
+RESTORE TEXTGEN LLAMA.CPP
+=========================
+
+INSTALL_INTO_TEXTGEN.bat moves your original llama_cpp_binaries\bin folder to a timestamped backup such as:
+
+bin_BACKUP_20260813_131000
+
+To restore it:
+
+1. Close TextGen completely.
+2. Delete or rename the new llama_cpp_binaries\bin folder.
+3. Rename the timestamped bin_BACKUP_... folder back to bin.
+4. Start TextGen normally.
